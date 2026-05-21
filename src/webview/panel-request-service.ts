@@ -14,7 +14,7 @@ import { Workspace } from '../core/types';
 import {
   callLlm,
   callLlmJson,
-  SCHEMA_CATALOG_PICKS,
+  SCHEMA_CLAUDE_SUGGESTIONS,
   SCHEMA_CODE_REVIEW,
   SCHEMA_CONTEXT_REVIEW,
   SCHEMA_DID_YOU_KNOW,
@@ -22,7 +22,6 @@ import {
   SCHEMA_RESOURCES,
   SCHEMA_TRIAGE,
 } from './panel-llm';
-import { getCatalogItems } from './panel-catalog';
 import { validateDateFilter } from './panel-rpc';
 import { isNumber, isOptionalString, isRecord, isString, postError, postEvent, postResponse, RequestMessage } from './panel-shared';
 
@@ -34,15 +33,18 @@ type CustomPanelMethodName =
   | 'generateCodeComparison'
   | 'generateDidYouKnow'
   | 'installSkill'
-  | 'installCatalogItem'
   | 'triageSkills'
-  | 'discoverCatalog'
-  | 'triageCatalog'
+  | 'suggestClaudeSkills'
   | 'reviewContextFiles'
   | 'getWorkspaceDeps'
   | 'getSdlcToolAnalysis'
   | 'getSdlcRepoScan'
   | 'getSdlcGitHubData';
+  /* ARCHIVED: restore when a Claude Code community catalog exists.
+   * | 'installCatalogItem'
+   * | 'discoverCatalog'
+   * | 'triageCatalog'
+   */
 
 type RequestHandler = (msg: RequestMessage) => void | Promise<void>;
 type QuizDifficulty = 'easy' | 'medium' | 'hard';
@@ -106,15 +108,18 @@ export class PanelRequestService {
     generateCodeComparison: this.handleGenerateCodeComparison.bind(this),
     generateDidYouKnow: this.handleGenerateDidYouKnow.bind(this),
     installSkill: this.handleInstallSkill.bind(this),
-    installCatalogItem: this.handleInstallCatalogItem.bind(this),
     triageSkills: this.handleTriageSkills.bind(this),
-    discoverCatalog: this.handleDiscoverCatalog.bind(this),
-    triageCatalog: this.handleTriageCatalog.bind(this),
+    suggestClaudeSkills: this.handleSuggestClaudeSkills.bind(this),
     reviewContextFiles: this.handleReviewContextFiles.bind(this),
     getWorkspaceDeps: this.handleGetWorkspaceDeps.bind(this),
     getSdlcToolAnalysis: this.handleGetSdlcToolAnalysis.bind(this),
     getSdlcRepoScan: this.handleGetSdlcRepoScan.bind(this),
     getSdlcGitHubData: this.handleGetSdlcGitHubData.bind(this),
+    /* ARCHIVED: restore when a Claude Code community catalog exists.
+     * installCatalogItem: this.handleInstallCatalogItem.bind(this),
+     * discoverCatalog: this.handleDiscoverCatalog.bind(this),
+     * triageCatalog: this.handleTriageCatalog.bind(this),
+     */
   };
 
   constructor(
@@ -314,8 +319,8 @@ ${skillDraft}`;
 
     try {
       const text = await callLlm([
-        vscode.LanguageModelChatMessage.User(systemPrompt),
-        vscode.LanguageModelChatMessage.User(userPrompt),
+        { role: 'user' as const, content: systemPrompt },
+        { role: 'user' as const, content: userPrompt },
       ]);
 
       let content = text.trim();
@@ -337,8 +342,8 @@ ${skillDraft}`;
 
     try {
       const response = await callLlmJson<{ items: QuizQuestion[] }>([
-        vscode.LanguageModelChatMessage.User(systemPrompt),
-        vscode.LanguageModelChatMessage.User(userPrompt),
+        { role: 'user' as const, content: systemPrompt },
+        { role: 'user' as const, content: userPrompt },
       ], SCHEMA_QUIZ);
 
       const validated = this.normalizeQuizQuestions(response, context.difficulty);
@@ -410,8 +415,8 @@ Generate 3 code comparison rounds for this developer's ecosystem. Mix the catego
         difficulty: string;
         language: string;
       }> }>([
-        vscode.LanguageModelChatMessage.User(systemPrompt),
-        vscode.LanguageModelChatMessage.User(userPrompt),
+        { role: 'user' as const, content: systemPrompt },
+        { role: 'user' as const, content: userPrompt },
       ], SCHEMA_CODE_REVIEW);
 
       const rounds = Array.isArray(response) ? response as unknown as typeof response['items'] : response.items ?? [];
@@ -471,7 +476,7 @@ Respond with a JSON object: {"items":[{"fact":"...", "project":"...", "category"
 
     try {
       const response = await callLlmJson<{ items: Array<{ fact: string; project: string; category: string }> }>(
-        [vscode.LanguageModelChatMessage.User(systemPrompt)],
+        [{ role: 'user' as const, content: systemPrompt }],
         SCHEMA_DID_YOU_KNOW,
       );
       const facts = Array.isArray(response) ? response as unknown as typeof response['items'] : response.items ?? [];
@@ -524,7 +529,7 @@ Respond with a JSON object: {"items":[{"title":"...","url":"https://...","type":
 
     try {
       const response = await callLlmJson<{ items: Array<{ title: string; url: string; type: string; reason: string }> }>(
-        [vscode.LanguageModelChatMessage.User(systemPrompt)],
+        [{ role: 'user' as const, content: systemPrompt }],
         SCHEMA_RESOURCES,
       );
       const resources = Array.isArray(response) ? response as unknown as typeof response['items'] : response.items ?? [];
@@ -600,41 +605,41 @@ Respond with a JSON object: {"items":[{"title":"...","url":"https://...","type":
     }
   }
 
-  private async handleInstallCatalogItem(msg: RequestMessage): Promise<void> {
-    const params = (msg.params ?? {}) as Record<string, unknown>;
-    const catalogPath = isString(params.path) ? params.path : '';
-    const kind = isString(params.kind) ? params.kind : 'skill';
-    const title = isString(params.title) ? params.title : '';
-    if (!catalogPath || catalogPath.includes('..') || catalogPath.startsWith('/') || catalogPath.startsWith('\\')) {
-      postError(this.webview, msg.id, 'Invalid catalog path');
-      return;
-    }
-
-    try {
-      const rawUrl = `https://raw.githubusercontent.com/github/awesome-copilot/main/${catalogPath}`;
-      const parsedUrl = new URL(rawUrl);
-      if (parsedUrl.hostname !== 'raw.githubusercontent.com' || !parsedUrl.pathname.startsWith('/github/awesome-copilot/')) {
-        postError(this.webview, msg.id, 'Invalid catalog URL');
-        return;
-      }
-      const response = await fetch(parsedUrl.toString());
-      if (!response.ok) throw new Error(`Failed to fetch: ${response.status}`);
-      const content = await response.text();
-
-      const homeDir = process.env.HOME || process.env.USERPROFILE;
-      if (!homeDir) throw new Error('Cannot determine home directory');
-      const subDir = kind === 'agent' ? 'agents' : 'skills';
-      const slug = title.toLowerCase().replaceAll(/[^a-z0-9]+/g, '-').replaceAll(/-+/g, '-').replaceAll(/^-|-$/g, '');
-      const filename = catalogPath.split('/').pop() || `${slug}.md`;
-      if (slug.includes('..') || filename.includes('..')) throw new Error('Invalid path');
-
-      const targetUri = vscode.Uri.file(`${homeDir}/.agents/${subDir}/${slug}/${filename}`);
-      await vscode.workspace.fs.writeFile(targetUri, Buffer.from(content, 'utf8'));
-      postResponse(this.webview, msg.id, { content, filename: `${slug}/${filename}` });
-    } catch (error: unknown) {
-      postError(this.webview, msg.id, error instanceof Error ? error.message : 'Install failed');
-    }
-  }
+  /* ARCHIVED: handleInstallCatalogItem — restore when a Claude Code community catalog exists.
+   * Fetched a GitHub Copilot skill/agent from raw.githubusercontent.com/github/awesome-copilot
+   * and installed it under ~/.agents/skills/ or ~/.agents/agents/.
+   *
+   * private async handleInstallCatalogItem(msg: RequestMessage): Promise<void> {
+   *   const params = (msg.params ?? {}) as Record<string, unknown>;
+   *   const catalogPath = isString(params.path) ? params.path : '';
+   *   const kind = isString(params.kind) ? params.kind : 'skill';
+   *   const title = isString(params.title) ? params.title : '';
+   *   if (!catalogPath || catalogPath.includes('..') || catalogPath.startsWith('/') || catalogPath.startsWith('\\')) {
+   *     postError(this.webview, msg.id, 'Invalid catalog path'); return;
+   *   }
+   *   try {
+   *     const rawUrl = `https://raw.githubusercontent.com/github/awesome-copilot/main/${catalogPath}`;
+   *     const parsedUrl = new URL(rawUrl);
+   *     if (parsedUrl.hostname !== 'raw.githubusercontent.com' || !parsedUrl.pathname.startsWith('/github/awesome-copilot/')) {
+   *       postError(this.webview, msg.id, 'Invalid catalog URL'); return;
+   *     }
+   *     const response = await fetch(parsedUrl.toString());
+   *     if (!response.ok) throw new Error(`Failed to fetch: ${response.status}`);
+   *     const content = await response.text();
+   *     const homeDir = process.env.HOME || process.env.USERPROFILE;
+   *     if (!homeDir) throw new Error('Cannot determine home directory');
+   *     const subDir = kind === 'agent' ? 'agents' : 'skills';
+   *     const slug = title.toLowerCase().replaceAll(/[^a-z0-9]+/g, '-').replaceAll(/-+/g, '-').replaceAll(/^-|-$/g, '');
+   *     const filename = catalogPath.split('/').pop() || `${slug}.md`;
+   *     if (slug.includes('..') || filename.includes('..')) throw new Error('Invalid path');
+   *     const targetUri = vscode.Uri.file(`${homeDir}/.agents/${subDir}/${slug}/${filename}`);
+   *     await vscode.workspace.fs.writeFile(targetUri, Buffer.from(content, 'utf8'));
+   *     postResponse(this.webview, msg.id, { content, filename: `${slug}/${filename}` });
+   *   } catch (error: unknown) {
+   *     postError(this.webview, msg.id, error instanceof Error ? error.message : 'Install failed');
+   *   }
+   * }
+   */
 
   private async handleTriageSkills(msg: RequestMessage): Promise<void> {
     const params = (msg.params ?? {}) as Record<string, unknown>;
@@ -689,8 +694,8 @@ Here are the top ${clusterSummaries.length} groups of similar prompts this devel
 
     try {
       const response = await callLlmJson<{ items: Array<{ id: string; verdict: string; reason: string; suggestedSkillName: string | null }> }>([
-        vscode.LanguageModelChatMessage.User(systemPrompt),
-        vscode.LanguageModelChatMessage.User(userPrompt),
+        { role: 'user' as const, content: systemPrompt },
+        { role: 'user' as const, content: userPrompt },
       ], SCHEMA_TRIAGE);
       const triaged = Array.isArray(response) ? response as unknown as typeof response['items'] : response.items ?? [];
       const validVerdicts = new Set(['strong', 'maybe', 'skip']);
@@ -708,102 +713,83 @@ Here are the top ${clusterSummaries.length} groups of similar prompts this devel
     }
   }
 
-  private async handleDiscoverCatalog(msg: RequestMessage): Promise<void> {
-    try {
-      const items = (await getCatalogItems()).map(item => ({
-        ...item,
-        relevanceScore: 0,
-        matchReasons: [],
-      }));
-      postResponse(this.webview, msg.id, { items, totalScanned: items.length });
-    } catch (error: unknown) {
-      postError(this.webview, msg.id, error instanceof Error ? error.message : 'Failed to fetch catalog');
-    }
-  }
+  /* ARCHIVED: handleDiscoverCatalog and handleTriageCatalog — restore when a Claude Code community catalog exists.
+   *
+   * handleDiscoverCatalog fetched all items from awesome-copilot.github.com (getCatalogItems) and
+   * returned them with empty relevance scores for the UI to display.
+   *
+   * handleTriageCatalog received the fetched items plus the developer's workflow clusters and asked
+   * the LLM (SCHEMA_CATALOG_PICKS) to pick up to 5 relevant items with reasons. The items were
+   * GitHub Copilot-specific (SKILL.md, .github/agents/) and not applicable to Claude Code.
+   *
+   * Both handlers were replaced by handleSuggestClaudeSkills below which generates Claude Code
+   * customizations (CLAUDE.md additions, slash commands, hooks, MCP servers) directly from workflow
+   * patterns without any external catalog dependency.
+   */
 
-  private async handleTriageCatalog(msg: RequestMessage): Promise<void> {
+  private async handleSuggestClaudeSkills(msg: RequestMessage): Promise<void> {
     const params = (msg.params ?? {}) as Record<string, unknown>;
-    const itemsRaw: unknown[] = Array.isArray(params.items) ? params.items : [];
-    const candidates = itemsRaw.map((item: unknown) => {
-      const entry = isRecord(item) ? item : {};
-      return {
-        id: toText(entry.id),
-        kind: toText(entry.kind),
-        title: toText(entry.title),
-        description: toText(entry.description).slice(0, 120),
-        category: toText(entry.category),
-      };
-    });
-
     const clustersRaw = Array.isArray(params.clusters) ? params.clusters : [];
+    const workspace = isOptionalString(params.workspace) ? params.workspace : undefined;
+
     const clusterContext = clustersRaw.slice(0, 30).map((cluster: unknown) => {
       const entry = isRecord(cluster) ? cluster : {};
       return {
         label: toText(entry.label),
         occurrences: typeof entry.occurrences === 'number' ? entry.occurrences : 0,
         workspaces: Array.isArray(entry.workspaces) ? entry.workspaces : [],
-        examples: getStringArray(entry.examples, 2),
+        examples: getStringArray(entry.examples, 3),
       };
     });
 
     const context = this.getUserContext();
-    const workspace = isOptionalString(params.workspace) ? params.workspace : undefined;
 
-    const systemPrompt = `You are an expert at recommending GitHub Copilot customization files (skills, agents, instructions, hooks) for developers.
+    const systemPrompt = `You are an expert Claude Code user who helps developers customize their Claude Code setup.
 
-You will receive:
-1. The developer's context: languages, harnesses, topics, and which workspace they are currently analyzing
-2. Their TOP REPEATED WORKFLOW PATTERNS with example prompts — these show exactly what tasks the developer performs repeatedly
-3. The FULL community catalog (${candidates.length} items) of skills, agents, instructions, and hooks
+You will receive a developer's repeated workflow patterns (things they ask Claude repeatedly). Your job is to suggest concrete Claude Code customizations that would save them time.
 
-Your job:
-1. Study the workflow patterns and example prompts carefully. These tell you EXACTLY what this developer does day-to-day.
-2. Consider the specific workspace being analyzed: ${workspace ? `"${workspace}"` : 'all workspaces'}.
-3. From the FULL catalog, find items that DIRECTLY help with the developer's actual repeated tasks or tech stack.
-4. REJECT items that don't match. A .NET skill is useless for someone building VS Code extensions. A React skill is useless for someone writing Python CLIs.
-5. For each pick, write a concrete reason referencing the developer's ACTUAL workflow patterns. Example: "You repeatedly package VS Code extensions (seen 47 times) — this skill automates VSIX packaging."
+Generate up to 5 suggestions. Each suggestion must be one of:
+- **claude-md**: A section to add to their CLAUDE.md project instructions file (project-specific context, commands, conventions)
+- **slash-command**: A Claude Code slash command file (.claude/commands/name.md) that automates a repeated task
+- **hook**: A Claude Code hook (post-tool, pre-tool, etc.) that runs automatically during their workflow
+- **mcp-server**: An MCP server recommendation that would help with their tech stack
 
-Respond with a JSON object: {"items":[{"id":"...","reason":"specific sentence referencing their actual workflow patterns"}]}
-Max 5 items. If fewer genuinely match, return fewer. If NOTHING matches well, return empty items array. Do NOT pad with generic picks.`;
+For each suggestion:
+- Make it SPECIFIC to their actual workflow patterns, not generic
+- The \`content\` field should contain the actual file content or configuration they can copy-paste
+- Reference their actual repeated tasks in the \`reason\` field
+
+Return a JSON object matching the schema. Only suggest items that genuinely match their workflow. Return fewer than 5 if fewer truly apply.`;
 
     const clusterSection = clusterContext.length > 0
-      ? `\n\nTop repeated workflow patterns (${clusterContext.length}):\n${JSON.stringify(clusterContext, null, 2)}`
-      : '';
+      ? `\n\nTop repeated workflow patterns (${clusterContext.length} groups):\n${JSON.stringify(clusterContext, null, 2)}`
+      : '\n\nNo workflow patterns available yet.';
 
     const userPrompt = `Developer context:
 - Languages: ${context.languages.join(', ') || 'unknown'}
-- Harnesses: ${context.harnesses.join(', ') || 'unknown'}
+- AI harnesses used: ${context.harnesses.join(', ') || 'unknown'}
 - Common topics: ${context.topics.join(', ') || 'unknown'}
-- Analyzing workspace: ${workspace || 'all workspaces'}${clusterSection}
-
-Full catalog (${candidates.length} items):
-${JSON.stringify(candidates)}`;
+- Workspaces: ${context.workspaces.join(', ') || 'unknown'}${workspace ? `\n- Currently analyzing: ${workspace}` : ''}${clusterSection}`;
 
     try {
-      const response = await callLlmJson<{ items: Array<{ id: string; reason: string }> }>([
-        vscode.LanguageModelChatMessage.User(systemPrompt),
-        vscode.LanguageModelChatMessage.User(userPrompt),
-      ], SCHEMA_CATALOG_PICKS);
-      const picks = Array.isArray(response) ? response as unknown as typeof response['items'] : response.items ?? [];
-      const enriched = picks.map(pick => {
-        const rawItem = itemsRaw.find(item => isRecord(item) && item.id === pick.id);
-        const raw = isRecord(rawItem) ? rawItem : undefined;
-        return {
-          id: pick.id,
-          kind: toText(raw?.kind),
-          title: toText(raw?.title),
-          description: toText(raw?.description),
-          category: toText(raw?.category),
-          path: toText(raw?.path),
-          url: toText(raw?.url),
-          relevanceScore: 100,
-          matchReasons: [pick.reason],
-        };
-      }).filter(item => item.title);
+      const response = await callLlmJson<{ items: Array<{ id: string; kind: string; title: string; description: string; content: string; reason: string }> }>([
+        { role: 'user' as const, content: systemPrompt },
+        { role: 'user' as const, content: userPrompt },
+      ], SCHEMA_CLAUDE_SUGGESTIONS);
+      const items = Array.isArray(response) ? response as unknown as typeof response['items'] : response.items ?? [];
+      const validKinds = new Set(['claude-md', 'slash-command', 'hook', 'mcp-server']);
+      const result = items.map(item => ({
+        id: String(item.id || `suggestion-${Math.random().toString(36).slice(2, 8)}`),
+        kind: validKinds.has(item.kind) ? item.kind as 'claude-md' | 'slash-command' | 'hook' | 'mcp-server' : 'slash-command' as const,
+        title: String(item.title || ''),
+        description: String(item.description || ''),
+        content: String(item.content || ''),
+        reason: String(item.reason || ''),
+      })).filter(item => item.title);
 
-      postResponse(this.webview, msg.id, { items: enriched });
+      postResponse(this.webview, msg.id, { items: result });
     } catch (error: unknown) {
-      postError(this.webview, msg.id, error instanceof Error ? error.message : 'AI triage failed');
+      postError(this.webview, msg.id, error instanceof Error ? error.message : 'AI suggestion failed');
     }
   }
 
@@ -893,8 +879,8 @@ ${contextSection}`;
 
       const userPrompt = `Review these ${payloads.length} workspace(s):\n${workspaceData}`;
       const response = await callLlmJson<{ items: Array<Record<string, unknown>> }>([
-        vscode.LanguageModelChatMessage.User(systemPrompt),
-        vscode.LanguageModelChatMessage.User(userPrompt),
+        { role: 'user' as const, content: systemPrompt },
+        { role: 'user' as const, content: userPrompt },
       ], SCHEMA_CONTEXT_REVIEW);
       const rawItems = Array.isArray(response) ? response as unknown as typeof response['items'] : response.items ?? [];
       const validCategories = new Set(categories);

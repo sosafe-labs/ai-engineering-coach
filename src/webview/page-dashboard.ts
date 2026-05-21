@@ -5,7 +5,7 @@
 
 /* Dashboard page renderer */
 
-import { DateFilter, DailyActivity, PRACTICE_GROUPS, AntiPatternData, WorkflowOptimizationData, SkillTriageResult, CatalogDiscoverResult, CatalogTriageResult, GroupScore, CodeProductionData } from '../core/types';
+import { DateFilter, DailyActivity, PRACTICE_GROUPS, AntiPatternData, WorkflowOptimizationData, SkillTriageResult, ClaudeSuggestion, ClaudeSuggestResult, GroupScore, CodeProductionData } from '../core/types';
 import { FF_TOKEN_REPORTING_ENABLED } from '../core/constants';
 import { rpc, rpcAllSettled, createChart, formatNum, COLORS, PALETTE, harnessColor, destroyChartById, scoreColor, scoreLabel } from './shared';
 import { html, render, CanvasEl, ScoreRing, PctBadge } from './render';
@@ -175,7 +175,7 @@ function renderWorkspaceCharts(wsBreakdown: { labels: string[]; values: number[]
 
 function renderDashboardSkillFinder(skillCache: ReturnType<typeof getSkillCache>, currentFilter: DateFilter): void {
   if (skillCache) {
-    renderSkillResults(skillCache.triaged, skillCache.clusters, skillCache.catalogMatches);
+    renderSkillResults(skillCache.triaged, skillCache.clusters, skillCache.claudeSuggestions);
     return;
   }
   document.getElementById('dashScanBtn')?.addEventListener('click', () => {
@@ -314,18 +314,18 @@ export async function renderDashboard(container: HTMLElement, currentFilter: Dat
 function renderSkillResults(
   triaged: import('../core/types').TriagedCluster[],
   clusters: import('../core/types').WorkflowCluster[],
-  catalogMatches: import('../core/types').CatalogItem[],
+  claudeSuggestions: ClaudeSuggestion[],
 ): void {
   const contentEl = document.getElementById('dashSkillContent');
   if (!contentEl) return;
 
   const strong = triaged.filter(t => t.verdict === 'strong').slice(0, 2);
-  const catTop = catalogMatches.slice(0, 2);
+  const sugTop = claudeSuggestions.slice(0, 2);
 
   const hasCustom = strong.length > 0;
-  const hasCatalog = catTop.length > 0;
+  const hasSuggestions = sugTop.length > 0;
 
-  if (!hasCustom && !hasCatalog) {
+  if (!hasCustom && !hasSuggestions) {
     render(html`<p style="color:var(--text-muted);margin:0;font-size:13px;">No skill opportunities found. Your prompts may already be well-served or too diverse.</p>
       <div style="text-align:center;margin-top:10px;"><a href="#" data-page="skills" style=${'font-size:12px;color:' + COLORS.blue + ';text-decoration:none;'}>Open Skill Finder for full analysis \u2192</a></div>`, contentEl);
     return;
@@ -347,13 +347,13 @@ function renderSkillResults(
           : html`<p style="color:var(--text-muted);margin:0;font-size:12px;">None detected</p>`}
       </div>
       <div>
-        <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Community Matches</div>
-        ${hasCatalog
+        <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Claude Suggestions</div>
+        ${hasSuggestions
           ? html`<div style="display:flex;flex-direction:column;gap:4px;">
-              ${catTop.map(item => html`<${SkillCard} title=${item.title} subtitle=${item.description?.substring(0, 80) || item.kind} />`)}
-              ${catalogMatches.length > 2 && html`<div style="font-size:11px;color:var(--text-muted);text-align:center;">+${catalogMatches.length - 2} more</div>`}
+              ${sugTop.map(item => html`<${SkillCard} title=${item.title} subtitle=${item.description?.substring(0, 80) || item.kind} />`)}
+              ${claudeSuggestions.length > 2 && html`<div style="font-size:11px;color:var(--text-muted);text-align:center;">+${claudeSuggestions.length - 2} more</div>`}
             </div>`
-          : html`<p style="color:var(--text-muted);margin:0;font-size:12px;">None matched</p>`}
+          : html`<p style="color:var(--text-muted);margin:0;font-size:12px;">None generated</p>`}
       </div>
     </div>
     <div style="text-align:center;margin-top:10px;">
@@ -377,7 +377,7 @@ async function loadDashSkills(currentFilter: DateFilter): Promise<void> {
     const clusters = data.clusters || [];
 
     let triagedResults: import('../core/types').TriagedCluster[] = [];
-    let catalogMatches: import('../core/types').CatalogItem[] = [];
+    let claudeSuggestions: ClaudeSuggestion[] = [];
 
     if (clusters.length > 0) {
       contentEl.querySelector('p')!.textContent = 'AI triage in progress...';
@@ -390,34 +390,22 @@ async function loadDashSkills(currentFilter: DateFilter): Promise<void> {
         examples: c.examples.slice(0, 5),
       }));
 
-      // Run custom triage and catalog discovery in parallel
-      const [triageResult, catResult] = await Promise.all([
+      // Run custom triage and Claude Code suggestions in parallel
+      const [triageResult, suggestResult] = await Promise.all([
         rpc<SkillTriageResult>('triageSkills', { clusters: topClusters } as Record<string, unknown>).catch(() => null),
-        rpc<CatalogDiscoverResult>('discoverCatalog', {} as Record<string, unknown>).catch(() => null),
+        rpc<ClaudeSuggestResult>('suggestClaudeSkills', { clusters: topClusters } as Record<string, unknown>).catch(() => null),
       ]);
 
       if (triageResult) {
-        triagedResults = (triageResult.triaged || []).filter(t => t.verdict === 'strong');
+        triagedResults = (triageResult.triaged || []).filter((t: import('../core/types').TriagedCluster) => t.verdict === 'strong');
       }
-
-      // Triage catalog if available
-      if (catResult?.items && catResult.items.length > 0) {
-        contentEl.querySelector('p')!.textContent = 'Matching community catalog...';
-        try {
-          const triaged = await rpc<CatalogTriageResult>('triageCatalog', {
-            items: catResult.items,
-            clusters: topClusters.map(c => ({
-              label: c.label, occurrences: c.occurrences,
-              workspaces: c.workspaces, examples: c.examples.slice(0, 3),
-            })),
-          } as Record<string, unknown>);
-          catalogMatches = triaged.items || [];
-        } catch { /* catalog triage failed */ }
+      if (suggestResult) {
+        claudeSuggestions = suggestResult.items || [];
       }
     }
 
-    setSkillCache({ clusters, triaged: triagedResults, catalogMatches, timestamp: Date.now() }, currentFilter);
-    renderSkillResults(triagedResults, clusters, catalogMatches);
+    setSkillCache({ clusters, triaged: triagedResults, claudeSuggestions, timestamp: Date.now() }, currentFilter);
+    renderSkillResults(triagedResults, clusters, claudeSuggestions);
   } catch {
     render(html`<p style="color:var(--text-muted);margin:0;font-size:13px;">Scan failed. Try again later.</p>`, contentEl);
   }

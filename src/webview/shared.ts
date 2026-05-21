@@ -12,7 +12,12 @@ export const vscode = acquireVsCodeApi();
 let rpcId = 0;
 const RPC_TIMEOUT_MS = 120_000;
 const RPC_LLM_TIMEOUT_MS = 300_000;
-const LLM_METHODS = new Set(['generateRule', 'explainOccurrence']);
+const LLM_METHODS = new Set([
+  'generateRule', 'explainOccurrence',
+  'generateSkillContent', 'generateLearningQuiz', 'generateCodeComparison',
+  'generateLearningResources', 'generateDidYouKnow',
+  'triageSkills', 'suggestClaudeSkills',
+]);
 const pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
 
 /**

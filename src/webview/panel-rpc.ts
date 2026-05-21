@@ -906,8 +906,6 @@ const rpcHandlers: TypedRpcHandlers = {
 
       const sessionSummary = buildOccurrenceSessionSummary(session);
 
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const vscode = require('vscode') as typeof import('vscode');
       const { callLlm } = await import('./panel-llm');
 
       const systemPrompt = `You are an expert explaining why a specific coding session triggered an AI Engineer Coach detection rule.
@@ -930,8 +928,8 @@ ${JSON.stringify(sessionSummary, null, 2)}
 Explain why this session triggered the rule.`;
 
       const messages = [
-        vscode.LanguageModelChatMessage.User(systemPrompt),
-        vscode.LanguageModelChatMessage.User(userPrompt),
+        { role: 'user' as const, content: systemPrompt },
+        { role: 'user' as const, content: userPrompt },
       ];
 
       const explanation = await callLlm(messages);
@@ -1002,13 +1000,11 @@ Explain why this session triggered the rule.`;
       .substring(0, 40) || 'custom-rule';
 
     try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const vscode = require('vscode') as typeof import('vscode');
       const { callLlm } = await import('./panel-llm');
 
-      const messages = [
-        vscode.LanguageModelChatMessage.User(GENERATE_RULE_SYSTEM_PROMPT),
-        vscode.LanguageModelChatMessage.User(`Generate a complete detection rule for: ${prompt}\n\nUse id: ${id}`),
+      const messages: Array<{ role: 'user' | 'assistant'; content: string }> = [
+        { role: 'user', content: GENERATE_RULE_SYSTEM_PROMPT },
+        { role: 'user', content: `Generate a complete detection rule for: ${prompt}\n\nUse id: ${id}` },
       ];
 
       const MAX_ATTEMPTS = 2;
@@ -1019,10 +1015,10 @@ Explain why this session triggered the rule.`;
         if (issues.length === 0) return { markdown };
 
         // Retry: tell the LLM what was wrong
-        messages.push(vscode.LanguageModelChatMessage.Assistant(result));
-        messages.push(vscode.LanguageModelChatMessage.User(
+        messages.push({ role: 'assistant' as const, content: result });
+        messages.push({ role: 'user' as const, content:
           `The generated rule has issues:\n${issues.map(i => `- ${i}`).join('\n')}\n\nPlease fix and output the complete corrected rule markdown. No code fences around the output.`
-        ));
+        });
       }
 
       // After retries, return the last attempt even if imperfect
