@@ -74,8 +74,8 @@ AI features are only invoked when explicitly triggered by the user (e.g. generat
 ## Quick Start
 
 ```bash
-git clone https://github.com/sosafe-labs/AI-Engineering-Coach.git
-cd AI-Engineering-Coach
+git clone https://github.com/sosafe-labs/ai-engineering-coach.git
+cd ai-engineering-coach
 npm install
 npm run package
 ```
