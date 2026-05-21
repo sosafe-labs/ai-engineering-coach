@@ -5,13 +5,13 @@
 
 /* Skills page -- AI triage for skill opportunities + community catalog discovery */
 
-import { DateFilter, WorkflowCluster, WorkflowOptimizationData, SkillTriageResult, TriagedCluster, CatalogItem, CatalogDiscoverResult, CatalogTriageResult } from '../core/types';
+import { DateFilter, WorkflowCluster, WorkflowOptimizationData, SkillTriageResult, TriagedCluster, ClaudeSuggestion, ClaudeSuggestResult } from '../core/types';
 import { rpc, COLORS } from './shared';
 import { html, render } from './render';
 import { consumeNavHint, updateNavBadge } from './app';
 import { getSkillCache, setSkillCache } from './skill-cache';
 
-const CATALOG_BASE = 'https://awesome-copilot.github.com';
+const CATALOG_BASE = 'https://claude.ai/code';
 
 /** Set of cluster IDs the user has dismissed in this session */
 const dismissed = new Set<string>();
@@ -78,9 +78,9 @@ export async function renderSkills(container: HTMLElement, currentFilter: DateFi
     <section class="sk-section" id="catalogSection">
       <h2 class="sk-section-title">Community Skills & Agents</h2>
       <p class="sk-section-desc">
-        Matching picks from${' '}
-        <a href="${CATALOG_BASE}/" target="_blank">awesome-copilot</a>
-        ${' '}based on your repeated activities.
+        Matching picks from the${' '}
+        <a href="${CATALOG_BASE}" target="_blank">Claude Code</a>
+        ${' '}community based on your repeated activities.
       </p>
       <div id="catalogResults">
         <p class="sk-empty">Run the analysis to get personalized community recommendations.</p>
@@ -93,7 +93,7 @@ export async function renderSkills(container: HTMLElement, currentFilter: DateFi
   // Check for cached results from dashboard scan
   const cached = getSkillCache(currentFilter);
   if (cached && cached.clusters.length > 0) {
-    renderCachedResults(cached.clusters, cached.triaged, cached.catalogMatches);
+    renderCachedResults(cached.clusters, cached.triaged, cached.claudeSuggestions);
     return;
   }
 
@@ -106,7 +106,7 @@ export async function renderSkills(container: HTMLElement, currentFilter: DateFi
 
 /* ── Render cached results from dashboard ─────────────────────────── */
 
-function renderCachedResults(clusters: WorkflowCluster[], triaged: TriagedCluster[], catalogMatches: CatalogItem[]): void {
+function renderCachedResults(clusters: WorkflowCluster[], triaged: TriagedCluster[], claudeSuggestions: ClaudeSuggestion[]): void {
   const statusEl = document.getElementById('analyzeStatus')!;
   const customEl = document.getElementById('customResults')!;
   const catalogEl = document.getElementById('catalogResults')!;
@@ -125,14 +125,14 @@ function renderCachedResults(clusters: WorkflowCluster[], triaged: TriagedCluste
     renderTriageResults(customEl, strong, clusters);
   }
 
-  // Catalog
-  if (catalogMatches.length > 0) {
-    renderCatalogList(catalogEl, catalogMatches, catalogMatches.length);
+  // Claude Code suggestions
+  if (claudeSuggestions.length > 0) {
+    renderClaudeSuggestionList(catalogEl, claudeSuggestions);
   } else {
-    render(html`<p class="sk-empty">No community matches from dashboard scan. Click Analyze to re-run with full catalog.</p>`, catalogEl);
+    render(html`<p class="sk-empty">No Claude Code suggestions from dashboard scan. Click Analyze to re-run.</p>`, catalogEl);
   }
 
-  updateNavBadge('badge-skills', strong.length + catalogMatches.length);
+  updateNavBadge('badge-skills', strong.length + claudeSuggestions.length);
 }
 
 /* ── Analysis Flow ────────────────────────────────────────────────── */
@@ -212,10 +212,10 @@ async function runAnalysis(): Promise<void> {
     btn.textContent = 'Analyze';
   }
 
-  // Load community catalog after custom analysis and write to shared cache
-  const catalogMatches = await loadCatalog(catalogEl, clusters, workspaceName);
-  setSkillCache({ clusters, triaged: lastTriaged, catalogMatches, timestamp: Date.now() }, activeFilter);
-  updateNavBadge('badge-skills', lastTriaged.length + catalogMatches.length);
+  // Load Claude Code suggestions after custom analysis and write to shared cache
+  const claudeSuggestions = await loadClaudeSuggestions(catalogEl, clusters, workspaceName);
+  setSkillCache({ clusters, triaged: lastTriaged, claudeSuggestions, timestamp: Date.now() }, activeFilter);
+  updateNavBadge('badge-skills', lastTriaged.length + claudeSuggestions.length);
 }
 
 function triggerRunAnalysis(): void {
@@ -336,126 +336,90 @@ function renderTriageResults(container: HTMLElement, triaged: TriagedCluster[], 
   }
 }
 
-/* ── Community Catalog ────────────────────────────────────────────── */
+/* ── Claude Code Suggestions ─────────────────────────────────────── */
 
-const kindIcons: Record<string, string> = {
-  skill: 'S', agent: 'A', instruction: 'I', hook: 'H',
+const suggestionKindIcons: Record<string, string> = {
+  'claude-md': 'C', 'slash-command': '/', 'hook': 'H', 'mcp-server': 'M',
 };
-const kindColors: Record<string, string> = {
-  skill: COLORS.green, agent: COLORS.purple,
-  instruction: COLORS.blue, hook: COLORS.yellow,
+const suggestionKindColors: Record<string, string> = {
+  'claude-md': COLORS.blue, 'slash-command': COLORS.green,
+  'hook': COLORS.yellow, 'mcp-server': COLORS.purple,
 };
 
-async function loadCatalog(container: HTMLElement, clusters: WorkflowCluster[], workspace?: string): Promise<CatalogItem[]> {
+async function loadClaudeSuggestions(container: HTMLElement, clusters: WorkflowCluster[], workspace?: string): Promise<ClaudeSuggestion[]> {
+  render(html`<p class="sk-loading">Generating Claude Code customization suggestions...</p>`, container);
+
+  const topClusters = clusters
+    .sort((a, b) => b.occurrences - a.occurrences)
+    .slice(0, 20)
+    .map(c => ({ label: c.label, occurrences: c.occurrences, workspaces: c.workspaces, examples: c.examples.slice(0, 3) }));
+
   try {
-    // Fetch ALL catalog items (no pre-filtering)
-    const result = await rpc<CatalogDiscoverResult>('discoverCatalog', {} as Record<string, unknown>);
-    if (!result.items || result.items.length === 0) {
-      render(html`<p class="sk-empty">No items found in the community catalog.</p>`, container);
-      return [];
+    const result = await rpc<ClaudeSuggestResult>('suggestClaudeSkills', {
+      clusters: topClusters,
+      workspace: workspace || undefined,
+    } as Record<string, unknown>);
+
+    const items = result.items && result.items.length > 0 ? result.items : [];
+    if (items.length === 0) {
+      render(html`<p class="sk-empty">No Claude Code customizations generated for your workflow patterns.</p>`, container);
+    } else {
+      renderClaudeSuggestionList(container, items);
     }
-
-    render(html`<p class="sk-loading">AI is reviewing all ${result.items.length} catalog items against your patterns...</p>`, container);
-
-    const topClusters = clusters
-      .sort((a, b) => b.occurrences - a.occurrences)
-      .slice(0, 20)
-      .map(c => ({ label: c.label, occurrences: c.occurrences, workspaces: c.workspaces, examples: c.examples.slice(0, 3) }));
-
-    try {
-      const triaged = await rpc<CatalogTriageResult>('triageCatalog', {
-        items: result.items,
-        clusters: topClusters,
-        workspace: workspace || undefined,
-      } as Record<string, unknown>);
-
-      const items = triaged.items && triaged.items.length > 0 ? triaged.items : [];
-      if (items.length === 0) {
-        render(html`<p class="sk-empty">No community items matched your workflow patterns (${result.totalScanned} reviewed).</p>`, container);
-      } else {
-        renderCatalogList(container, items, result.totalScanned);
-      }
-      return items;
-    } catch {
-      render(html`<p class="sk-empty">AI triage failed. Try again later.</p>`, container);
-      return [];
-    }
+    return items;
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : 'Failed to load catalog';
-    render(html`<p class="sk-error">Catalog error: ${msg}</p>`, container);
+    const msg = err instanceof Error ? err.message : 'Failed to generate suggestions';
+    render(html`<p class="sk-error">Suggestion error: ${msg}</p>`, container);
     return [];
   }
 }
 
-function renderCatalogList(container: HTMLElement, items: CatalogItem[], totalScanned: number): void {
+function renderClaudeSuggestionList(container: HTMLElement, items: ClaudeSuggestion[]): void {
   render(html`
-    <p class="sk-section-count">${items.length} curated from ${totalScanned} catalog items</p>
-    <div class="sk-grid">${items.map(item => renderCatalogCard(item))}</div>
+    <p class="sk-section-count">${items.length} Claude Code customization${items.length === 1 ? '' : 's'} generated</p>
+    <div class="sk-grid">${items.map(item => renderClaudeSuggestionCard(item))}</div>
   `, container);
 
-  for (const btn of container.querySelectorAll('.sk-btn-install-catalog')) {
+  for (const btn of container.querySelectorAll('.sk-btn-copy-suggestion')) {
     btn.addEventListener('click', (e) => {
-      void (async () => {
-        const el = e.currentTarget as HTMLButtonElement;
-        const path = el.dataset.path || '';
-        const kind = el.dataset.kind || 'skill';
-        const title = el.dataset.title || '';
-        if (!path) return;
-
-        el.disabled = true;
-        el.textContent = 'Fetching...';
-
-        try {
-          const res = await rpc<{ content: string; filename: string }>('installCatalogItem', {
-            path, kind, title,
-          } as Record<string, unknown>);
-
-          el.textContent = 'Installed';
-          el.classList.add('sk-btn-done');
-          const parent = el.closest('.sk-card');
-          const msgEl = parent?.querySelector<HTMLElement>('.sk-install-msg');
-          if (msgEl) msgEl.textContent = `Installed as ${res.filename}`;
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : 'Install failed';
-          el.textContent = 'Install';
-          el.disabled = false;
-          const parent = el.closest('.sk-card');
-          const msgEl = parent?.querySelector<HTMLElement>('.sk-install-msg');
-          if (msgEl) { msgEl.textContent = msg; msgEl.classList.add('sk-error'); }
-        }
-      })();
+      const el = e.currentTarget as HTMLButtonElement;
+      const content = el.dataset.content || '';
+      void navigator.clipboard.writeText(content).then(() => {
+        el.textContent = 'Copied!';
+        el.classList.add('sk-btn-done');
+        setTimeout(() => {
+          el.textContent = 'Copy';
+          el.classList.remove('sk-btn-done');
+        }, 2000);
+      });
     });
   }
 }
 
-function renderCatalogCard(item: CatalogItem): ReturnType<typeof html> {
-  const color = kindColors[item.kind] || COLORS.blue;
-  const icon = kindIcons[item.kind] || '?';
-  const kindLabel = item.kind.charAt(0).toUpperCase() + item.kind.slice(1);
-  const ghUrl = `https://github.com/github/awesome-copilot/blob/main/${encodeURI(item.path)}`;
+function renderClaudeSuggestionCard(item: ClaudeSuggestion): ReturnType<typeof html> {
+  const color = suggestionKindColors[item.kind] || COLORS.blue;
+  const icon = suggestionKindIcons[item.kind] || '?';
+  const kindLabel = item.kind.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 
   return html`
     <div class="sk-card sk-card-catalog">
       <div class="sk-card-header">
         <span class="sk-kind-icon" style="background:${color}">${icon}</span>
         <div>
-          <div class="sk-card-title">
-            <a href="${ghUrl}" target="_blank">${item.title}</a>
-          </div>
+          <div class="sk-card-title">${item.title}</div>
           <div class="sk-card-badges">
             <span class="sk-badge" style="color:${color}">${kindLabel}</span>
-            ${item.category ? html`<span class="sk-badge">${item.category}</span>` : null}
           </div>
         </div>
       </div>
       <div class="sk-card-body">
         <p class="sk-card-desc">${item.description.length > 200 ? item.description.slice(0, 200) + '...' : item.description}</p>
-        ${item.matchReasons.length > 0 ? html`
+        ${item.reason ? html`
           <div class="sk-card-reasons">
-            ${item.matchReasons.map(r => html`<span class="sk-reason">${r}</span>`)}
+            <span class="sk-reason">${item.reason}</span>
           </div>` : null}
         <div class="sk-card-actions">
-          <button class="sk-btn sk-btn-install-catalog" data-path="${item.path}" data-kind="${item.kind}" data-title="${item.title}">Install</button>
+          <button class="sk-btn sk-btn-copy-suggestion" data-content="${item.content}">Copy</button>
           <span class="sk-install-msg"></span>
         </div>
       </div>

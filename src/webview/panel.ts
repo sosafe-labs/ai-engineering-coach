@@ -12,7 +12,6 @@ import { clearCache, findLogsDirs, parseAllLogsViaWorker, ParseResult } from '..
 import { runtimeDebug } from '../core/runtime-debug';
 import { WebviewMessage } from '../core/types';
 import { panelCache } from './panel-cache';
-import { clearCatalogCache } from './panel-catalog';
 import { getDashboardHtml, getErrorHtml } from './panel-html';
 import { getRpcHandler } from './panel-rpc';
 import { PanelRequestService } from './panel-request-service';
@@ -106,7 +105,6 @@ export class DashboardPanel {
     }
     runtimeDebug('panel', 'reload');
     clearCache();
-    clearCatalogCache();
     panelCache.clear();
     this.analyzer = undefined;
     this.parseResult = undefined;

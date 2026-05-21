@@ -124,10 +124,13 @@ export interface ExtensionMethodMap extends RpcMethodMap {
   generateCodeComparison: { params: Record<string, unknown>; result: { rounds: unknown[] } };
   generateDidYouKnow: { params: Record<string, unknown>; result: { facts: unknown[] } };
   installSkill: { params: { filename: string; content: string }; result: { ok: boolean; path?: string; error?: string } };
-  installCatalogItem: { params: { path: string; kind?: string; title?: string }; result: { content: string; filename: string; error?: string } };
   triageSkills: { params: Record<string, unknown>; result: { triaged: unknown[] } };
-  discoverCatalog: { params: Record<string, unknown> | undefined; result: { items: unknown[]; totalScanned: number } };
-  triageCatalog: { params: Record<string, unknown>; result: { items: unknown[] } };
+  suggestClaudeSkills: { params: Record<string, unknown>; result: { items: unknown[] } };
+  /* ARCHIVED: Restore when a Claude Code community catalog exists.
+   * installCatalogItem: { params: { path: string; kind?: string; title?: string }; result: { content: string; filename: string; error?: string } };
+   * discoverCatalog: { params: Record<string, unknown> | undefined; result: { items: unknown[]; totalScanned: number } };
+   * triageCatalog: { params: Record<string, unknown>; result: { items: unknown[] } };
+   */
   reviewContextFiles: { params: { workspaceIds: string[]; count?: number }; result: { reviews?: unknown[]; error?: string } };
   getWorkspaceDeps: { params: { limit?: number } | undefined; result: { deps: { workspace: string; dependencies: string[]; devDependencies: string[] }[] } };
   getSdlcToolAnalysis: { params: { filter?: DateFilter } | Record<string, unknown>; result: { mcpServers: unknown[] } };

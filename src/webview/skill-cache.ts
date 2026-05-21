@@ -6,12 +6,12 @@
 /* Shared cache so dashboard skill results propagate to the skills page.
    Scoped by workspace + harness filter so switching filters preserves each. */
 
-import { WorkflowCluster, TriagedCluster, CatalogItem, DateFilter } from '../core/types';
+import { WorkflowCluster, TriagedCluster, ClaudeSuggestion, DateFilter } from '../core/types';
 
 export interface SkillCacheData {
   clusters: WorkflowCluster[];
   triaged: TriagedCluster[];
-  catalogMatches: CatalogItem[];
+  claudeSuggestions: ClaudeSuggestion[];
   timestamp: number;
 }
 

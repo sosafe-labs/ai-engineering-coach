@@ -70,35 +70,32 @@ async function compileLlm(
   prompt: string,
   options?: { group?: string; severity?: string; scope?: string },
 ): Promise<string | null> {
-  // Dynamic import to avoid bundling vscode types
-  let vscode: typeof import('vscode');
+  // Dynamic require to avoid bundling vscode types into the core module
+  let vscodeModule: typeof import('vscode') | null = null;
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    vscode = require('vscode') as typeof import('vscode');
+    vscodeModule = require('vscode') as typeof import('vscode');
   } catch {
     return null;
   }
 
-  const lm = vscode.lm;
-  if (!lm) return null;
+  const cfg = vscodeModule.workspace.getConfiguration('aiEngineerCoach.llm');
+  const apiKey = cfg.get<string>('apiKey', '');
+  const baseUrl = cfg.get<string>('baseUrl', '');
+  if (!apiKey || !baseUrl) return null;
 
-  const models = await lm.selectChatModels({ family: 'gpt-4.1' });
-  const model = models[0];
-  if (!model) return null;
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { AiSdkClient } = require('@sosafe-aws/be-lib-ai') as typeof import('@sosafe-aws/be-lib-ai');
+  const sdk = new AiSdkClient({ apiKey, baseUrl });
+  const model = cfg.get<string>('model', 'gpt-5.1');
 
-  const systemPrompt = buildSystemPrompt();
-  const userPrompt = buildUserPrompt(prompt, options);
+  const response = await sdk.responses.openai.create({
+    instructions: buildSystemPrompt(),
+    prompt: buildUserPrompt(prompt, options),
+    model,
+  });
 
-  const messages = [
-    vscode.LanguageModelChatMessage.User(systemPrompt),
-    vscode.LanguageModelChatMessage.User(userPrompt),
-  ];
-
-  const response = await model.sendRequest(messages, {});
-  let result = '';
-  for await (const chunk of response.text) {
-    result += chunk;
-  }
+  const result = response.result ?? '';
 
   // Extract markdown from code block if wrapped
   const fenced = result.match(/```(?:markdown)?\s*\n([\s\S]*?)```/);

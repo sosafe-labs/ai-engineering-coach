@@ -495,12 +495,21 @@ export async function renderAchievements(container: HTMLElement, filter: DateFil
     { hours: [] },
   ] as const);
 
-  const sessions = await rpc<{ total: number; sessions: { sessionId: string; requestCount: number; firstMessage: string }[] }>('getSessions', { page: 1, pageSize: 100, filter: filter as Record<string, unknown> });
-  const dailyActivity = await rpc<DailyActivity>('getDailyActivity',  filter as Record<string, unknown>);
-  const allSessions = await rpc<{ total: number }>('getSessions', { page: 1, pageSize: 1, filter: filter as Record<string, unknown> });
-  const codeByLang = await rpc<{ byLanguage: { labels: string[] } }>('getCodeProduction',  filter as Record<string, unknown>);
-  const consumption = await rpc<{ modelTotals: Record<string, number> }>('getConsumption',  filter as Record<string, unknown>);
-  const workflows = await rpc<{ clusters: { id: string }[] }>('getWorkflowOptimization',  filter as Record<string, unknown>);
+  const [sessions, dailyActivity, allSessions, codeByLang, consumption, workflows] = await rpcAllSettled([
+    rpc<{ total: number; sessions: { sessionId: string; requestCount: number; firstMessage: string }[] }>('getSessions', { page: 1, pageSize: 100, filter: filter as Record<string, unknown> }),
+    rpc<DailyActivity>('getDailyActivity', filter as Record<string, unknown>),
+    rpc<{ total: number }>('getSessions', { page: 1, pageSize: 1, filter: filter as Record<string, unknown> }),
+    rpc<{ byLanguage: { labels: string[] } }>('getCodeProduction', filter as Record<string, unknown>),
+    rpc<{ modelTotals: Record<string, number> }>('getConsumption', filter as Record<string, unknown>),
+    rpc<{ clusters: { id: string }[] }>('getWorkflowOptimization', filter as Record<string, unknown>),
+  ] as const, [
+    { total: 0, sessions: [] },
+    { labels: [], values: [], sessions: [], loc: [], workspaces: [], byHarness: [] } as DailyActivity,
+    { total: 0 },
+    { byLanguage: { labels: [] } },
+    { modelTotals: {} },
+    { clusters: [] },
+  ] as const);
 
   const avgReqsPerSession = allSessions.total > 0 ? stats.totalRequests / allSessions.total : 0;
   const cancelRate = antiPatterns.totalOccurrences > 0 ? (antiPatterns.totalOccurrences / stats.totalRequests) * 100 : 0;

@@ -6,19 +6,15 @@
 /* LLM schemas and request helpers for the dashboard panel. */
 
 import * as vscode from 'vscode';
+import { AiSdkClient, OpenAiResponseFormat, BedrockResponseFormat } from '@sosafe-aws/be-lib-ai';
+
+/** Simple message type used by all LLM call sites. */
+export type LlmMessage = { role: 'user' | 'assistant'; content: string };
 
 export interface JsonSchemaSpec {
   name: string;
+  description?: string;
   schema: Record<string, unknown>;
-}
-
-function structuredOutputOptions(spec: JsonSchemaSpec): Record<string, unknown> {
-  return {
-    response_format: {
-      type: 'json_schema',
-      json_schema: { name: spec.name, strict: true, schema: spec.schema },
-    },
-  };
 }
 
 export const SCHEMA_QUIZ: JsonSchemaSpec = {
@@ -151,8 +147,10 @@ export const SCHEMA_TRIAGE: JsonSchemaSpec = {
   },
 };
 
-export const SCHEMA_CATALOG_PICKS: JsonSchemaSpec = {
-  name: 'catalog_picks',
+/** JSON schema for LLM-generated Claude Code customization suggestions. */
+export const SCHEMA_CLAUDE_SUGGESTIONS: JsonSchemaSpec = {
+  name: 'claude_suggestions',
+  description: 'Claude Code customization suggestions based on developer workflow patterns',
   schema: {
     type: 'object',
     properties: {
@@ -162,9 +160,13 @@ export const SCHEMA_CATALOG_PICKS: JsonSchemaSpec = {
           type: 'object',
           properties: {
             id: { type: 'string' },
+            kind: { type: 'string', enum: ['claude-md', 'slash-command', 'hook', 'mcp-server'] },
+            title: { type: 'string' },
+            description: { type: 'string' },
+            content: { type: 'string' },
             reason: { type: 'string' },
           },
-          required: ['id', 'reason'],
+          required: ['id', 'kind', 'title', 'description', 'content', 'reason'],
           additionalProperties: false,
         },
       },
@@ -173,6 +175,23 @@ export const SCHEMA_CATALOG_PICKS: JsonSchemaSpec = {
     additionalProperties: false,
   },
 };
+
+/* ARCHIVED: SCHEMA_CATALOG_PICKS was used with the awesome-copilot catalog triage flow.
+ * Restore when a Claude Code community catalog exists.
+ *
+ * export const SCHEMA_CATALOG_PICKS: JsonSchemaSpec = {
+ *   name: 'catalog_picks',
+ *   schema: {
+ *     type: 'object',
+ *     properties: {
+ *       items: { type: 'array', items: { type: 'object',
+ *         properties: { id: { type: 'string' }, reason: { type: 'string' } },
+ *         required: ['id', 'reason'], additionalProperties: false } },
+ *     },
+ *     required: ['items'], additionalProperties: false,
+ *   },
+ * };
+ */
 
 export const SCHEMA_CONTEXT_REVIEW: JsonSchemaSpec = {
   name: 'context_file_review',
@@ -300,26 +319,8 @@ function parseLlmJson<T>(text: string): T {
 }
 
 const LLM_MAX_RETRIES = 2;
-const LLM_FAMILY = 'gpt-4.1';
-/** Hard cap for a single LLM streaming request (ms). Prevents the UI from
- *  spinning forever when the model hangs or the user never grants consent. */
+/** Hard cap for a single LLM request (ms). */
 const LLM_REQUEST_TIMEOUT_MS = 90_000;
-
-/**
- * Pick a Copilot chat model. Tries the preferred family first, then a short
- * fallback list, then any available model. Throws a descriptive error when
- * nothing is available so callers can surface a useful message.
- */
-async function selectModel(): Promise<vscode.LanguageModelChat> {
-  const families = [LLM_FAMILY, 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4'];
-  for (const family of families) {
-    const models = await vscode.lm.selectChatModels({ family });
-    if (models.length > 0) return models[0];
-  }
-  const any = await vscode.lm.selectChatModels({});
-  if (any.length > 0) return any[0];
-  throw new Error('No language model available. Make sure GitHub Copilot is installed and signed in.');
-}
 
 /** Race a promise against a timeout. Rejects with a clear message on timeout. */
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
@@ -332,71 +333,117 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   });
 }
 
-export async function callLlm(messages: vscode.LanguageModelChatMessage[]): Promise<string> {
-  const model = await selectModel();
+function getClient(): AiSdkClient {
+  const cfg = vscode.workspace.getConfiguration('aiEngineerCoach.llm');
+  const apiKey = cfg.get<string>('apiKey', '');
+  const baseUrl = cfg.get<string>('baseUrl', '');
+  if (!apiKey || !baseUrl) {
+    throw new Error(
+      'AI service not configured. Set aiEngineerCoach.llm.apiKey and aiEngineerCoach.llm.baseUrl in VS Code settings.'
+    );
+  }
+  return new AiSdkClient({ apiKey, baseUrl, retry: { maxAttempts: 3, initialDelayMs: 200, backoffFactor: 2 } });
+}
+
+function getModel(): string {
+  return vscode.workspace.getConfiguration('aiEngineerCoach.llm').get<string>('model', 'gpt-5.1');
+}
+
+function getProvider(): string {
+  return vscode.workspace.getConfiguration('aiEngineerCoach.llm').get<string>('provider', 'openai');
+}
+
+/**
+ * Translate a message array into SDK `{ instructions, prompt }` params.
+ *
+ * Callers use the convention [User(system), User(content)], matching the old
+ * VS Code LM API pattern where a separate system role didn't exist.
+ * Multi-turn arrays (retry loops) are flattened into a single prompt.
+ */
+function toSdkParams(messages: LlmMessage[]): { instructions?: string; prompt: string } {
+  if (messages.length === 1) return { prompt: messages[0].content };
+  if (messages.length === 2) return { instructions: messages[0].content, prompt: messages[1].content };
+  // Multi-turn (e.g. retry loop): flatten with role labels
+  return { prompt: messages.map(m => `[${m.role.toUpperCase()}]\n${m.content}`).join('\n\n') };
+}
+
+async function createResponse(instructions: string | undefined, prompt: string): Promise<string> {
+  const sdk = getClient();
+  const model = getModel();
+  const provider = getProvider();
+
+  const params = { prompt, instructions, model, stream: true as const };
+
+  const stream = provider === 'bedrock'
+    ? sdk.responses.bedrock.create(params)
+    : sdk.responses.openai.create(params);
+
+  let text = '';
+  for await (const event of stream) {
+    if (event.type === 'text') text += event.value;
+    if (event.type === 'error') throw new Error(event.value);
+  }
+  return text;
+}
+
+export async function callLlm(messages: LlmMessage[]): Promise<string> {
+  const { instructions, prompt } = toSdkParams(messages);
 
   let lastError: unknown;
   for (let attempt = 0; attempt <= LLM_MAX_RETRIES; attempt++) {
-    const cts = new vscode.CancellationTokenSource();
     try {
-      const streamText = async () => {
-        const response = await model.sendRequest(messages, {}, cts.token);
-        let text = '';
-        for await (const chunk of response.text) text += chunk;
-        return text;
-      };
-      return await withTimeout(streamText(), LLM_REQUEST_TIMEOUT_MS, 'LLM request');
+      return await withTimeout(createResponse(instructions, prompt), LLM_REQUEST_TIMEOUT_MS, 'LLM request');
     } catch (err) {
-      cts.cancel();
       lastError = err;
-      if (err instanceof vscode.CancellationError) throw err;
-    } finally {
-      cts.dispose();
     }
   }
   throw lastError;
 }
 
-export async function callLlmJson<T>(messages: vscode.LanguageModelChatMessage[], jsonSchema?: JsonSchemaSpec): Promise<T> {
-  const model = await selectModel();
-
-  const options: vscode.LanguageModelChatRequestOptions = jsonSchema
-    ? { modelOptions: structuredOutputOptions(jsonSchema) }
-    : {};
+export async function callLlmJson<T>(messages: LlmMessage[], jsonSchema?: JsonSchemaSpec): Promise<T> {
+  const sdk = getClient();
+  const model = getModel();
+  const provider = getProvider();
 
   let lastError: unknown;
   let parseFailures = 0;
   const retryMessages = [...messages];
 
   for (let attempt = 0; attempt <= LLM_MAX_RETRIES; attempt++) {
-    const cts = new vscode.CancellationTokenSource();
+    const { instructions: retryInstructions, prompt: retryPrompt } = toSdkParams(retryMessages);
+
     try {
-      const response = await model.sendRequest(retryMessages, options, cts.token);
-      let text = '';
-      for await (const chunk of response.text) text += chunk;
+      const base = { prompt: retryPrompt, instructions: retryInstructions, model, stream: false as const };
+      const schemaSpec = jsonSchema
+        ? { name: jsonSchema.name, description: jsonSchema.description ?? '', schema: jsonSchema.schema, strict: true }
+        : undefined;
+      const call = provider === 'bedrock'
+        ? sdk.responses.bedrock.create(schemaSpec
+            ? { ...base, responseFormat: BedrockResponseFormat.JSON_SCHEMA, responseFormatSchema: schemaSpec }
+            : base)
+        : sdk.responses.openai.create(schemaSpec
+            ? { ...base, responseFormat: OpenAiResponseFormat.JSON_SCHEMA, responseFormatSchema: schemaSpec }
+            : base);
+      const response = await withTimeout(call, LLM_REQUEST_TIMEOUT_MS, 'LLM request');
+
+      const text = (response.result ?? '').trim();
       try {
-        return JSON.parse(text.trim()) as T;
+        return JSON.parse(text) as T;
       } catch {
         return parseLlmJson<T>(text);
       }
     } catch (err) {
       lastError = err;
-      if (err instanceof vscode.CancellationError) { cts.dispose(); throw err; }
-      // If structured output isn't supported, fall back to plain mode
-      if (attempt === 0 && jsonSchema && lastError instanceof Error && /response_format|modelOptions|not supported/i.test(lastError.message)) {
-        options.modelOptions = undefined;
-      }
       // On parse failures, nudge the model to return valid JSON on the next attempt
       if (lastError instanceof Error && /JSON|parse/i.test(lastError.message)) {
         parseFailures++;
         if (retryMessages.length === messages.length) {
-          retryMessages.push(vscode.LanguageModelChatMessage.User(
-            'Your previous response was not valid JSON. Please respond ONLY with a valid JSON object or array, no markdown fences, no commentary.'
-          ));
+          retryMessages.push({
+            role: 'user',
+            content: 'Your previous response was not valid JSON. Please respond ONLY with a valid JSON object or array, no markdown fences, no commentary.',
+          });
         }
       }
-    } finally {
-      cts.dispose();
     }
   }
 
@@ -405,3 +452,4 @@ export async function callLlmJson<T>(messages: vscode.LanguageModelChatMessage[]
     : (lastError instanceof Error ? lastError.message : 'LLM request failed after retries');
   throw new Error(label);
 }
+
